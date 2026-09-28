@@ -41,6 +41,7 @@ import { resolveMachineProviderRuntime } from "./machine-provider-config.ts";
 import { MachineStorePg } from "./machine-store.ts";
 import { ManagedTunnelProviderLive } from "./managed-tunnel.ts";
 import { PushDeliveryLive } from "./push.ts";
+import { availableSandboxProviders } from "./sandbox-provider-availability.ts";
 import {
 	resolveSandboxProviderRuntime,
 	SandboxOfferConfiguration,
@@ -151,6 +152,7 @@ interface Env extends SlackBindings {
 	readonly CLOUD_WORKSPACE_RUNTIME_MANIFEST_URL?: string;
 	readonly CLOUD_WORKSPACE_RUNTIME_SIGNING_PUBLIC_JWK?: string;
 	readonly SANDBOX_DEFAULT_PROVIDER_ID?: string;
+	readonly CLOUD_AUTH_PROVIDER_ID?: string;
 	readonly BOAT_ADAPTER_ENABLED?: string;
 	readonly BOAT_API_KEY?: string;
 	readonly BOAT_API_BASE_URL?: string;
@@ -177,6 +179,13 @@ interface Env extends SlackBindings {
 	readonly E2B_VCPU_COUNT?: string;
 	readonly E2B_MEMORY_MIB?: string;
 	readonly E2B_WEBHOOK_SECRET?: string;
+	readonly BOXD_ADAPTER_ENABLED?: string;
+	readonly BOXD_API_KEY?: string;
+	readonly BOXD_ORG?: string;
+	readonly BOXD_BASE_URL?: string;
+	readonly BOXD_TEMPLATE_SNAPSHOT?: string;
+	readonly BOXD_TEMPLATE_VERSION?: string;
+	readonly BOXD_MACHINE_SIZE?: string;
 	readonly CLOUD_BILLING_ENFORCEMENT_ENABLED?: string;
 	readonly CLOUD_BILLING_EXPORT_ENABLED?: string;
 	readonly CLOUD_BILLING_CUTOVER_AT?: string;
@@ -291,14 +300,10 @@ const build = (env: Env, directStartup = false): ReturnType<typeof makeApi> => {
 				}
 			: {}),
 	};
-	const availableSandboxProviderIds = new Set(
-		sandboxProvider.configuredProviders
-			.filter(
-				(provider) =>
-					provider.advertised &&
-					(env.POLAR_ENVIRONMENT === "sandbox" || provider.productionReady),
-			)
-			.map((provider) => provider.providerId),
+	const availableSandboxProviderIds = availableSandboxProviders(
+		sandboxProvider.configuredProviders,
+		env.POLAR_ENVIRONMENT === "sandbox",
+		env.CLOUD_BILLING_ENFORCEMENT_ENABLED === "true",
 	);
 	const persistentCheckoutReady =
 		billing.liveCheckoutEnabled &&
@@ -367,6 +372,7 @@ const build = (env: Env, directStartup = false): ReturnType<typeof makeApi> => {
 		cloudDataEncryptionKey: isConfigured(cloudDataEncryptionKey)
 			? Redacted.make(cloudDataEncryptionKey)
 			: undefined,
+		cloudAuthProviderId: sandboxProvider.cloudAuthProviderId,
 		githubApp: githubAppConfigured
 			? {
 					appId: env.GITHUB_APP_ID as string,

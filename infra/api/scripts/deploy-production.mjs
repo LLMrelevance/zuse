@@ -2,6 +2,7 @@ import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { parse } from "jsonc-parser";
 import { readBoatEnvironment } from "../src/boat-environment.ts";
+import { supportsSandboxBilling } from "../src/sandbox-provider-availability.ts";
 
 const confirmation = "deploy-api.zuse.sh";
 const configPath = "wrangler.production.jsonc";
@@ -21,6 +22,20 @@ const config = parse(readFileSync(configPath, "utf8"));
 const vars = config.vars ?? {};
 const boat = readBoatEnvironment(vars);
 const boatEnabled = boat.BOAT_ADAPTER_ENABLED === "true";
+const e2bEnabled = vars.E2B_ADAPTER_ENABLED === "true";
+const boxdEnabled = vars.BOXD_ADAPTER_ENABLED === "true";
+if (
+	boxdEnabled &&
+	!supportsSandboxBilling(
+		"boxd",
+		vars.CLOUD_BILLING_ENFORCEMENT_ENABLED === "true",
+	)
+) {
+	console.error(
+		"BOXD_ADAPTER_ENABLED cannot be true when CLOUD_BILLING_ENFORCEMENT_ENABLED is true.",
+	);
+	process.exit(1);
+}
 const slackEnabled = vars.SLACK_ENABLED === "true";
 const requiredValues = {
 	...(boatEnabled
@@ -29,10 +44,20 @@ const requiredValues = {
 				BOAT_TEMPLATE_VERSION: boat.BOAT_TEMPLATE_VERSION,
 			}
 		: {}),
+	...(boxdEnabled
+		? {
+				BOXD_TEMPLATE_SNAPSHOT: vars.BOXD_TEMPLATE_SNAPSHOT,
+				BOXD_TEMPLATE_VERSION: vars.BOXD_TEMPLATE_VERSION,
+			}
+		: {}),
 	HYPERDRIVE: config.hyperdrive?.[0]?.id,
 	R2: config.r2_buckets?.[0]?.bucket_name,
-	E2B_TEMPLATE_ID: vars.E2B_TEMPLATE_ID,
-	E2B_TEMPLATE_VERSION: vars.E2B_TEMPLATE_VERSION,
+	...(e2bEnabled
+		? {
+				E2B_TEMPLATE_ID: vars.E2B_TEMPLATE_ID,
+				E2B_TEMPLATE_VERSION: vars.E2B_TEMPLATE_VERSION,
+			}
+		: {}),
 	CLOUD_WORKSPACE_RUNTIME_MANIFEST_URL:
 		vars.CLOUD_WORKSPACE_RUNTIME_MANIFEST_URL,
 	CLOUD_WORKSPACE_RUNTIME_SIGNING_PUBLIC_JWK:
@@ -58,13 +83,24 @@ const requiredValues = {
 const missingValues = Object.entries(requiredValues)
 	.filter(([, value]) => typeof value !== "string" || value.trim() === "")
 	.map(([name]) => name);
-if (
-	vars.E2B_ADAPTER_ENABLED !== "true" ||
-	vars.POLAR_ENVIRONMENT !== "production" ||
-	missingValues.length > 0
-) {
+const enabledAdapters = new Set([
+	...(e2bEnabled ? ["e2b"] : []),
+	...(boatEnabled ? ["box", "boat"] : []),
+	...(boxdEnabled ? ["boxd"] : []),
+]);
+const cloudAuthProvider =
+	(typeof vars.CLOUD_AUTH_PROVIDER_ID === "string"
+		? vars.CLOUD_AUTH_PROVIDER_ID.trim()
+		: "") || "e2b";
+if (!enabledAdapters.has(cloudAuthProvider)) {
 	console.error(
-		`Production configuration is incomplete: ${missingValues.join(", ") || "E2B_ADAPTER_ENABLED/POLAR_ENVIRONMENT"}.`,
+		`CLOUD_AUTH_PROVIDER_ID names a provider that is not enabled: ${cloudAuthProvider}.`,
+	);
+	process.exit(1);
+}
+if (vars.POLAR_ENVIRONMENT !== "production" || missingValues.length > 0) {
+	console.error(
+		`Production configuration is incomplete: ${missingValues.join(", ") || "POLAR_ENVIRONMENT"}.`,
 	);
 	process.exit(1);
 }
@@ -86,11 +122,11 @@ const requiredSecrets = [
 	...(boatEnabled && !installedSecrets.has("BOX_API_KEY")
 		? ["BOAT_API_KEY"]
 		: []),
+	...(boxdEnabled ? ["BOXD_API_KEY"] : []),
 	"RELAY_MINT_PRIVATE_JWK",
 	"WORKOS_API_KEY",
 	"CF_API_TOKEN",
-	"E2B_API_KEY",
-	"E2B_WEBHOOK_SECRET",
+	...(e2bEnabled ? ["E2B_API_KEY", "E2B_WEBHOOK_SECRET"] : []),
 	"CLOUD_CREDENTIAL_VAULT_KEY",
 	"POLAR_ACCESS_TOKEN",
 	"POLAR_WEBHOOK_SECRET",

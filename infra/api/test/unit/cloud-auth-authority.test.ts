@@ -16,17 +16,28 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { CODEX_EXTERNAL_AUTH_TOOLCHAIN_VERSION } from "@zuse/contracts";
-import { Effect } from "effect";
+import {
+	makeSandboxProviders,
+	SandboxProviderError,
+	SandboxProviders,
+} from "@zuse/sandbox-providers";
+import { SandboxProvidersFake } from "@zuse/sandbox-providers/testing";
+import { Effect, Layer, Redacted } from "effect";
 import { describe, expect, test } from "vitest";
-
 import {
 	AUTH_GRANT_SOURCE,
 	AUTH_INITIALIZER_SOURCE,
 	CODEX_GRANT_SOURCE,
+	canSeedCloudAuthSnapshot,
 	cloudAuthAuthorityLabel,
 	parseDeviceLoginOutput,
 	snapshotCloudAuthAuthority,
 } from "../../src/cloud-auth-authority.ts";
+import {
+	CloudWorkspaceStore,
+	CloudWorkspaceStoreMemory,
+} from "../../src/cloud-workspace-store.ts";
+import * as Config from "../../src/config.ts";
 
 const grantAdditionalData = (sealed: Record<string, unknown>): Buffer =>
 	Buffer.from(
@@ -43,6 +54,82 @@ const grantAdditionalData = (sealed: Record<string, unknown>): Buffer =>
 	);
 
 describe("cloud auth authority identity", () => {
+	test.each([
+		"boxd",
+		"e2b",
+	])("uses persisted %s authority after configuration changes", async (providerId) => {
+		let resumed = false;
+		const result = await Effect.runPromise(
+			Effect.gen(function* () {
+				const store = yield* CloudWorkspaceStore;
+				yield* store.claimCloudAuthAuthority({
+					accountId: "account",
+					provider: providerId,
+					candidateStorageIncarnationId: "incarnation",
+					toolchainVersion: "test",
+					leaseOwner: "worker",
+					nowMs: 100,
+					leaseExpiresAtMs: 200,
+				});
+				yield* store.completeCloudAuthAuthorityProvisioning({
+					accountId: "account",
+					providerSandboxId: "authority",
+					storageIncarnationId: "incarnation",
+					toolchainVersion: "test",
+					leaseOwner: "worker",
+					nowMs: 150,
+				});
+				const fake = yield* (yield* SandboxProviders).get("fake");
+				const registry = yield* makeSandboxProviders({
+					registrations: [
+						{
+							adapter: {
+								...fake,
+								providerId,
+								inspect: () =>
+									Effect.succeed({
+										providerSandboxId: "authority",
+										providerLabel: "authority",
+										state: "paused" as const,
+									}),
+								resume: () => {
+									resumed = true;
+									return Effect.fail(
+										new SandboxProviderError({ code: "transient" }),
+									);
+								},
+							},
+						},
+					],
+					defaultProviderId: providerId,
+				});
+				return yield* snapshotCloudAuthAuthority(
+					"account",
+					"image",
+					"e2b",
+				).pipe(Effect.provideService(SandboxProviders, registry), Effect.exit);
+			}).pipe(
+				Effect.provide(
+					Layer.mergeAll(
+						CloudWorkspaceStoreMemory,
+						SandboxProvidersFake,
+						Config.layer({
+							apiIssuer: "https://api.test",
+							workosJwksUrl: "https://unused.test/jwks",
+							workosIssuer: "https://unused.test",
+							mintPrivateKey: Redacted.make("{}"),
+							mintPublicKey: "{}",
+							cloudAuthProviderId: providerId === "boxd" ? "e2b" : "boxd",
+						}),
+					),
+				),
+			),
+		);
+		// Stop at resume: only the persisted E2B authority may reach snapshot preparation.
+		expect(resumed).toBe(providerId === "e2b");
+		expect(result._tag).toBe(providerId === "e2b" ? "Failure" : "Success");
+	});
+
 	test("does not seed a Box image with an E2B snapshot", async () => {
 		await expect(
 			Effect.runPromise(
@@ -51,6 +138,13 @@ describe("cloud auth authority identity", () => {
 				>,
 			),
 		).resolves.toBeUndefined();
+	});
+	test("seeds images only when the authority and the image both live on E2B", () => {
+		expect(canSeedCloudAuthSnapshot("e2b")).toBe(true);
+		expect(canSeedCloudAuthSnapshot("e2b", "e2b")).toBe(true);
+		expect(canSeedCloudAuthSnapshot("e2b", "boxd")).toBe(false);
+		expect(canSeedCloudAuthSnapshot("boxd", "boxd")).toBe(false);
+		expect(canSeedCloudAuthSnapshot("box", "e2b")).toBe(false);
 	});
 	test("isolates deployments but remains stable across image updates", async () => {
 		const label = (apiIssuer: string) =>

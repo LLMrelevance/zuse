@@ -134,6 +134,102 @@ else process.exit(2);
 		}
 	});
 
+	test.each([
+		"snapshot",
+		"version",
+		"secret",
+		"auth-provider",
+		"billing",
+		"ready",
+		"boxd-only-ready",
+		"boxd-only-disabled-auth",
+		"boxd-only-default-auth",
+	])("checks enabled boxd prerequisites before deployment: %s", async (scenario) => {
+		const boxdOnly = scenario.startsWith("boxd-only-");
+		const ready = scenario === "ready" || scenario === "boxd-only-ready";
+		const directory = await mkdtemp(join(tmpdir(), "zuse-deploy-test-"));
+		try {
+			const config = parse(await readFile(productionWranglerConfigUrl, "utf8"));
+			config.vars.CLOUD_BILLING_ENFORCEMENT_ENABLED =
+				scenario === "billing" ? "true" : "false";
+			// The login authority may only name an enabled adapter.
+			config.vars.BOXD_ADAPTER_ENABLED =
+				scenario === "auth-provider" ? "false" : "true";
+			if (scenario === "auth-provider")
+				config.vars.CLOUD_AUTH_PROVIDER_ID = "boxd";
+			config.vars.BOXD_TEMPLATE_SNAPSHOT =
+				scenario === "snapshot" ? "" : "zuse-base-v1";
+			config.vars.BOXD_TEMPLATE_VERSION = scenario === "version" ? " " : "1";
+			if (boxdOnly) {
+				config.vars.E2B_ADAPTER_ENABLED = "false";
+				config.vars.BOAT_ADAPTER_ENABLED = "false";
+				config.vars.SANDBOX_DEFAULT_PROVIDER_ID = "boxd";
+				delete config.vars.E2B_TEMPLATE_ID;
+				delete config.vars.E2B_TEMPLATE_VERSION;
+				if (scenario !== "boxd-only-default-auth")
+					config.vars.CLOUD_AUTH_PROVIDER_ID =
+						scenario === "boxd-only-ready" ? "boxd" : "e2b";
+			}
+			await writeFile(
+				join(directory, "wrangler.production.jsonc"),
+				JSON.stringify(config),
+			);
+			const secrets = [
+				"RELAY_MINT_PRIVATE_JWK",
+				"WORKOS_API_KEY",
+				"CF_API_TOKEN",
+				...(boxdOnly ? [] : ["E2B_API_KEY", "E2B_WEBHOOK_SECRET"]),
+				"CLOUD_CREDENTIAL_VAULT_KEY",
+				"POLAR_ACCESS_TOKEN",
+				"POLAR_WEBHOOK_SECRET",
+				"GITHUB_APP_PRIVATE_KEY",
+				"BOAT_API_KEY",
+			];
+			secrets.push("SLACK_CLIENT_SECRET", "SLACK_SIGNING_SECRET");
+			if (scenario !== "secret") secrets.push("BOXD_API_KEY");
+			await writeFile(
+				join(directory, "bunx"),
+				`#!${process.execPath}
+if (process.argv[3] === "secret") console.log(${JSON.stringify(JSON.stringify(secrets.map((name) => ({ name }))))});
+else if (process.argv[3] === "deploy") console.log("TEST_DEPLOY_REACHED");
+else process.exit(2);
+`,
+				{ mode: 0o700 },
+			);
+			const result = spawnSync(
+				process.execPath,
+				[fileURLToPath(productionDeployScriptUrl)],
+				{
+					cwd: directory,
+					encoding: "utf8",
+					env: {
+						...process.env,
+						PATH: `${directory}:${process.env.PATH}`,
+						ZUSE_CONFIRM_PRODUCTION_API_DEPLOY: "deploy-api.zuse.sh",
+					},
+				},
+			);
+			expect(result.status, result.stderr).toBe(ready ? 0 : 1);
+			if (ready) expect(result.stdout).toContain("TEST_DEPLOY_REACHED");
+			else {
+				expect(result.stdout).not.toContain("TEST_DEPLOY_REACHED");
+				expect(result.stderr).toContain(
+					scenario === "snapshot"
+						? "BOXD_TEMPLATE_SNAPSHOT"
+						: scenario === "version"
+							? "BOXD_TEMPLATE_VERSION"
+							: scenario === "auth-provider" || boxdOnly
+								? "CLOUD_AUTH_PROVIDER_ID"
+								: scenario === "billing"
+									? "CLOUD_BILLING_ENFORCEMENT_ENABLED"
+									: "BOXD_API_KEY",
+				);
+			}
+		} finally {
+			await rm(directory, { recursive: true, force: true });
+		}
+	});
+
 	test("makes unqualified deploy and secret commands target staging", async () => {
 		const packageJson = JSON.parse(await readFile(packageJsonUrl, "utf8")) as {
 			readonly scripts: Readonly<Record<string, string>>;
