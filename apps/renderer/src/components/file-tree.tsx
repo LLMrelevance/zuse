@@ -32,8 +32,14 @@ import {
 import { ChevronRight } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { OpenTarget } from "../lib/bridge.ts";
-import { dispatchFileTreeCommand } from "../lib/file-tree-client-bus.ts";
-import { fileTreeSnapshotOperations } from "../lib/file-tree-reconciliation.ts";
+import {
+	dispatchFileTreeCommand,
+	listDeferredDirectory,
+} from "../lib/file-tree-client-bus.ts";
+import {
+	deferredDirectoryPaths,
+	fileTreeSnapshotOperations,
+} from "../lib/file-tree-reconciliation.ts";
 import { useFileTreeResource } from "../lib/file-tree-resource-hooks.ts";
 import { useGitChangesResource } from "../lib/git-workspace-client-bus.ts";
 import { useSettingsStore } from "../lib/settings-client-bus.ts";
@@ -79,6 +85,8 @@ const joinRelPath = (base: string, name: string): string =>
 	base === "" ? name : `${base}/${name}`;
 
 const stripSlash = (p: string): string => p.replace(/\/+$/g, "");
+
+const EMPTY_PATHS: ReadonlyArray<string> = [];
 
 // Injected into the tree's shadow root: hide the default chevron and use the
 // Hugeicons Folder01 (closed) / Folder02 (open) glyphs instead. The mask paths
@@ -226,6 +234,7 @@ export function FileTree({
 			rootPath={rootPath}
 			worktreeId={worktreeId}
 			paths={view.data.paths}
+			deferredDirectories={view.data.deferredDirectories ?? EMPTY_PATHS}
 			truncated={view.data.truncated}
 		/>
 	);
@@ -240,6 +249,7 @@ function TreeView({
 	rootPath,
 	worktreeId,
 	paths,
+	deferredDirectories,
 	truncated,
 }: {
 	folderId: FolderId;
@@ -248,6 +258,7 @@ function TreeView({
 	rootPath: string;
 	worktreeId: WorktreeId | null;
 	paths: ReadonlyArray<string>;
+	deferredDirectories: ReadonlyArray<string>;
 	truncated: boolean;
 }) {
 	const { message: uiMessage } = useUiMessages(["common", "projects"]);
@@ -305,6 +316,10 @@ function TreeView({
 		[environmentId, folderId, openFileInTab, projectId, worktreeId],
 	);
 
+	// `onSelectionChange` is handed to the tree model before `loadDeferred`
+	// exists; read it through a ref.
+	const loadDeferredRef = useRef<(dir: string) => void>(() => {});
+
 	// Single selection of a file row opens it — matches the old click-to-open.
 	// Directory selection is a no-op; the tree toggles expansion itself.
 	const onSelectionChange = useCallback(
@@ -318,7 +333,10 @@ function TreeView({
 				model?.getItem(raw)?.isDirectory() ??
 				model?.getItem(canonical)?.isDirectory() ??
 				dirPathsRef.current.has(canonical);
-			if (isDir) return;
+			if (isDir) {
+				loadDeferredRef.current(canonical);
+				return;
+			}
 			openFile(canonical, basename(canonical));
 		},
 		[openFile],
@@ -439,6 +457,95 @@ function TreeView({
 				.map((path) => stripSlash(path)),
 		);
 	}, [model, paths]);
+
+	// Deferred directories (`node_modules`, gitignored build output) arrive
+	// empty; their children are fetched one level at a time each time the
+	// user opens them, and stay out of the watched snapshot.
+	const deferredRef = useRef<Set<string>>(new Set(deferredDirectories));
+	const loadedDeferredRef = useRef<Set<string>>(new Set());
+	const deferredPathsRef = useRef<Set<string>>(new Set());
+	const deferredRequestsRef = useRef<Map<string, object>>(new Map());
+	useEffect(() => {
+		for (const dir of deferredDirectories) deferredRef.current.add(dir);
+	}, [deferredDirectories]);
+	const loadDeferred = useCallback(
+		(dir: string) => {
+			const item = model.getItem(`${dir}/`);
+			if (item === null || !("isExpanded" in item) || !item.isExpanded())
+				return;
+			if (!deferredRef.current.has(dir) || loadedDeferredRef.current.has(dir))
+				return;
+			loadedDeferredRef.current.add(dir);
+			const request = {};
+			deferredRequestsRef.current.set(dir, request);
+			void listDeferredDirectory(executionRef, dir).then(
+				(entries) => {
+					if (deferredRequestsRef.current.get(dir) !== request) return;
+					const known = new Set(
+						[...deferredPathsRef.current].filter(
+							(path) => model.getItem(path) !== null,
+						),
+					);
+					const next = deferredDirectoryPaths(known, dir, entries);
+					const operations = fileTreeSnapshotOperations(known, next).filter(
+						(operation) => {
+							if (operation.type === "remove") return true;
+							const existing = model.getItem(operation.path);
+							return (
+								existing === null ||
+								existing.isDirectory() !== operation.path.endsWith("/")
+							);
+						},
+					);
+					deferredPathsRef.current = new Set(next);
+					for (const operation of operations) {
+						if (operation.type !== "remove" || !operation.path.endsWith("/"))
+							continue;
+						const removed = stripSlash(operation.path);
+						deferredRef.current.delete(removed);
+						loadedDeferredRef.current.delete(removed);
+						deferredRequestsRef.current.delete(removed);
+						dirPathsRef.current.delete(removed);
+					}
+					for (const entry of entries) {
+						if (entry.kind === "directory") {
+							// Everything inside a deferred directory loads on demand too.
+							deferredRef.current.add(entry.path);
+							dirPathsRef.current.add(entry.path);
+						}
+					}
+					if (operations.length > 0) model.batch(operations);
+				},
+				() => {
+					if (deferredRequestsRef.current.get(dir) !== request) return;
+					loadedDeferredRef.current.delete(dir);
+				},
+			);
+		},
+		[executionRef, model],
+	);
+	loadDeferredRef.current = loadDeferred;
+	useEffect(() => {
+		const loadExpanded = () => {
+			for (const dir of deferredRef.current) {
+				const item = model.getItem(`${dir}/`) ?? model.getItem(dir);
+				if (item === null || !("isExpanded" in item) || !item.isExpanded()) {
+					// Reopening must refresh unwatched contents; discard stale requests.
+					loadedDeferredRef.current.delete(dir);
+					deferredRequestsRef.current.delete(dir);
+					continue;
+				}
+				if (
+					!loadedDeferredRef.current.has(dir) &&
+					"isExpanded" in item &&
+					item.isExpanded()
+				)
+					loadDeferred(dir);
+			}
+		};
+		loadExpanded();
+		return model.subscribe(loadExpanded);
+	}, [loadDeferred, model]);
 
 	const attach = useCallback(
 		(path: string, kind: "file" | "directory") => {
