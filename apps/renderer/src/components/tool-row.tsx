@@ -2045,6 +2045,7 @@ function SubagentWaitDetail({ view }: { readonly view: SubagentWaitView }) {
 	);
 }
 
+/** Render expandable thinking with a teaser, or a placeholder for hidden content. */
 export function ThinkingRow({
 	text,
 	redacted,
@@ -2079,10 +2080,17 @@ export function ThinkingRow({
 	) : (
 		<MarkdownBlock text={text} />
 	);
+	// Collapsed teaser: the thought's opening line, without markdown emphasis,
+	// so the row gives a glimpse of what the model is weighing.
+	const teaser =
+		redacted || isEmpty
+			? ""
+			: firstSentence(text.replace(/\*\*|__|^#+\s*/gm, ""));
 	return (
 		<ExpandableIconRow
 			icon={Brain01Icon}
 			label={uiMessage("tools:tool_row_thinking")}
+			detail={teaser.length > 0 ? <InlineTextHint value={teaser} /> : undefined}
 			pending={pending}
 			hasContent
 			body={body}
