@@ -5,6 +5,7 @@
 	"type": "module",
 	"exports": {
 		"./attachment-upload": "./src/attachment-upload.ts",
+		"./chat-recency": "./src/chat-recency.ts",
 		"./cloud-gateway-recovery": "./src/cloud-gateway-recovery.ts",
 		"./session-message-pager": "./src/session-message-pager.ts",
 		"./session-message-intent": "./src/session-message-intent.ts",

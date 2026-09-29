@@ -884,6 +884,7 @@ export const publicCloudWorkspaceSummary = (
 					: 0),
 		unread,
 		lastMessageAt: currentSummary?.lastActivityAtMs ?? lastMessageAt,
+		lastUserMessageAt: runtimeSummary?.lastUserMessageAtMs ?? null,
 		...(workspace.state === "archived" || workspace.desiredState === "archived"
 			? {
 					archivedAt: workspace.archiveRequestedAtMs ?? workspace.updatedAtMs,
@@ -2042,6 +2043,7 @@ export const routeCloudWorkspaceRequest = (
 				summaryRevision: body.summaryRevision,
 				title: body.title,
 				lastActivityAtMs: body.lastActivityAt,
+				lastUserMessageAtMs: body.lastUserMessageAt,
 				activeSessionId:
 					body.activeSessionId === undefined
 						? workspace.initialSessionId

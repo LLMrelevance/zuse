@@ -698,6 +698,7 @@ export const makeCloudRuntimeSummaryPublisher = Effect.fn(
 		{
 			readonly title: string;
 			readonly lastActivityAt: number;
+			readonly lastUserMessageAt?: number | null;
 			readonly activeSessionId: SessionId | null;
 			readonly sessionHeadVersion: number;
 		},
@@ -719,6 +720,7 @@ export const makeCloudRuntimeSummaryPublisher = Effect.fn(
 		snapshot: {
 			readonly title: string;
 			readonly lastActivityAt: number;
+			readonly lastUserMessageAt?: number | null;
 			readonly activeSessionId: SessionId | null;
 			readonly sessionHeadVersion: number;
 		},
@@ -2501,6 +2503,7 @@ export const makeCloudWorkspaceRuntimeLayer = (
 						return {
 							title: chat.title,
 							lastActivityAt,
+							lastUserMessageAt: chat.lastUserMessageAt?.getTime() ?? null,
 							activeSessionId,
 							sessionHeadVersion,
 						};

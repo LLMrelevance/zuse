@@ -59,6 +59,7 @@ import { Migration0056DeviceBridge } from "./migrations/0056_device_bridge.ts";
 import { Migration0057DeviceBridgeDefaultAccess } from "./migrations/0057_device_bridge_default_access.ts";
 import { Migration0058QuestionAnswerDeliveries } from "./migrations/0058_question_answer_deliveries.ts";
 import { Migration0059EventSequenceIndex } from "./migrations/0059_event_sequence_index.ts";
+import { Migration0060ChatUserMessageTime } from "./migrations/0060_chat_user_message_time.ts";
 
 /**
  * Runs every numbered migration on boot. `fromRecord` keys must match
@@ -140,6 +141,7 @@ const MigrationDefinitions = {
 	"0057_device_bridge_default_access": Migration0057DeviceBridgeDefaultAccess,
 	"0058_question_answer_deliveries": Migration0058QuestionAnswerDeliveries,
 	"0059_event_sequence_index": Migration0059EventSequenceIndex,
+	"0060_chat_user_message_time": Migration0060ChatUserMessageTime,
 } as const;
 
 /** Shipped 0.16 schema boundary, exported for upgrade compatibility tests. */
