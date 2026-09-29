@@ -89,5 +89,6 @@
 	"hosted_select_a_repository_before_starting_a_cloud_chat": "Sélectionnez un dépôt avant de démarrer une discussion cloud.",
 	"hosted_archive_chat": "Archiver {{title}}",
 	"hosted_restore_chat": "Restaurer {{title}}",
-	"hosted_sign_in_failed": "Connexion impossible. Vérifiez votre connexion réseau et réessayez."
+	"hosted_sign_in_failed": "Connexion impossible. Vérifiez votre connexion réseau et réessayez.",
+	"cloud_image_leave_warning": "Your cloud image has unbuilt changes. Leave Settings? You can return to Cloud Workspace settings to finish building."
 }

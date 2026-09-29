@@ -89,5 +89,6 @@
 	"hosted_select_a_repository_before_starting_a_cloud_chat": "Select a repository before starting a cloud chat.",
 	"hosted_archive_chat": "Archive {{title}}",
 	"hosted_restore_chat": "Restore {{title}}",
-	"hosted_sign_in_failed": "Could not sign in. Check your connection and try again."
+	"hosted_sign_in_failed": "Could not sign in. Check your connection and try again.",
+	"cloud_image_leave_warning": "Your cloud image has unbuilt changes. Leave Settings? You can return to Cloud Workspace settings to finish building."
 }

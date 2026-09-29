@@ -1,4 +1,18 @@
 import { formatNumber as formatUiNumber } from "@zuse/i18n";
+import {
+	cloudImageGroupStatus,
+	rebuildCloudImages,
+} from "../../lib/cloud-image-group.ts";
+import {
+	refreshCloudImages,
+	subscribeCloudImages,
+} from "../../lib/cloud-image-monitor.ts";
+import {
+	CLOUD_CHECKOUT_STARTED,
+	type CloudSetupProgress,
+	type CloudSetupStep,
+	requestCloudOnboarding,
+} from "../../lib/cloud-onboarding.ts";
 import "@zuse/i18n/english/settings";
 import {
 	CLOUD_WORKSPACE_OFFER_ID,
@@ -24,8 +38,8 @@ import {
 	loadCloudBillingUsage,
 	loadCloudEntitlements,
 	loadCloudGithub,
-	loadCloudImage,
 	loadCloudProjects,
+	loadCloudProviderImages,
 	loadCloudProviders,
 	loadCloudWorkspaces,
 } from "../../lib/cloud-workspace-session-cache.ts";
@@ -39,7 +53,7 @@ import { Button } from "../ui/button.tsx";
 import { Input } from "../ui/input.tsx";
 import { SegmentedTabs } from "../ui/segmented-tabs.tsx";
 import { CloudApiKeys } from "./cloud-api-keys.tsx";
-import { CloudImageBuildHistory } from "./cloud-image-build-history.tsx";
+import { CloudImageProviders } from "./cloud-image-providers.tsx";
 import { CloudImageReadiness } from "./cloud-image-readiness.tsx";
 import {
 	CloudSettingsGroup,
@@ -69,21 +83,35 @@ const formatUsdMicros = (micros: number): string =>
 		maximumFractionDigits: 2,
 	});
 
-export function CloudWorkspacePool() {
+export function CloudWorkspacePool({
+	onboarding,
+}: {
+	readonly onboarding?: {
+		readonly step: CloudSetupStep;
+		readonly onProgress: (
+			progress: CloudSetupProgress,
+			loaded: boolean,
+		) => void;
+	};
+} = {}) {
 	const { message: uiMessage } = useUiMessages(["common", "settings"]);
 
 	const { isLoading: authLoading, isSignedIn, signIn, signingIn } = useAuth();
+	const [setupLoading, setSetupLoading] = useState(true);
 	const [entitlementSubscribed, setEntitlementSubscribed] = useState(false);
 	const [serviceAvailable, setServiceAvailable] = useState(true);
 	const [providers, setProviders] = useState<
 		ReadonlyArray<CloudProviderOption>
 	>([]);
-	const [imageProviderId, setImageProviderId] = useState<string | undefined>();
-	const imageSelection = useRef(imageProviderId);
-	imageSelection.current = imageProviderId;
+	const loadSequence = useRef(0);
 	const [projects, setProjects] = useState<ReadonlyArray<CloudProject>>([]);
-	const [accountImage, setAccountImage] = useState<CloudAccountImage | null>(
-		null,
+	const [providerImages, setProviderImages] = useState<
+		readonly CloudAccountImage[]
+	>([]);
+	useEffect(() => subscribeCloudImages(setProviderImages), []);
+	const accountImage = cloudImageGroupStatus(
+		providers.map((provider) => provider.providerId),
+		providerImages,
 	);
 	const [workspaces, setWorkspaces] = useState<ReadonlyArray<CloudWorkspace>>(
 		[],
@@ -103,6 +131,7 @@ export function CloudWorkspacePool() {
 	const [reposLoading, setReposLoading] = useState(false);
 	const [busy, setBusy] = useState<string | null>(null);
 	const [error, setError] = useState<string | null>(null);
+	const [buildError, setBuildError] = useState<string | null>(null);
 	const [imageError, setImageError] = useState<string | null>(null);
 	const [projectError, setProjectError] = useState<string | null>(null);
 	const [view, setView] = useState<"setup" | "usage" | "activity">("setup");
@@ -140,12 +169,15 @@ export function CloudWorkspacePool() {
 	const load = useCallback(
 		async (refresh = false) => {
 			if (!isSignedIn) return;
+			const requestSequence = ++loadSequence.current;
 			let loadedSubscribed = false;
 			const workspaceData = Promise.allSettled([
 				loadCloudProviders(refresh),
 				loadCloudProjects(refresh),
 				loadCloudWorkspaces(refresh),
-				loadCloudImage(imageProviderId, refresh),
+				loadCloudProviders(refresh).then(({ providers }) =>
+					loadCloudProviderImages(providers, refresh),
+				),
 			]);
 			try {
 				try {
@@ -188,11 +220,11 @@ export function CloudWorkspacePool() {
 					setProjects(projectResult.value.projects);
 				if (workspaceResult.status === "fulfilled")
 					setWorkspaces(workspaceResult.value.workspaces);
-				if (imageSelection.current !== imageProviderId) return;
+				if (requestSequence !== loadSequence.current) return;
 				if (imageResult.status === "fulfilled")
-					setAccountImage(imageResult.value);
+					setProviderImages(imageResult.value.images);
 				setImageError(
-					imageResult.status === "fulfilled"
+					imageResult.status === "fulfilled" && imageResult.value.complete
 						? null
 						: "Cloud image status is temporarily unavailable. Refresh in a moment; existing cloud chats are unaffected.",
 				);
@@ -216,20 +248,55 @@ export function CloudWorkspacePool() {
 						serviceAvailable: false,
 					}).serviceError,
 				);
+			} finally {
+				setSetupLoading(false);
 			}
 		},
-		[isSignedIn, imageProviderId],
+		[isSignedIn],
 	);
 
 	useEffect(() => {
 		if (authLoading || !isSignedIn) return;
-		void load();
-		void loadGithubRepos();
+		void load(true);
+		void loadGithubRepos(true);
 		return subscribeControlPlaneSessionCache((key) => {
 			if (key === "cloud-workspace:github") void loadGithubRepos();
 			else if (key.startsWith("cloud-workspace:")) void load();
 		});
 	}, [authLoading, isSignedIn, load, loadGithubRepos]);
+
+	const githubReady = githubAuthenticated && projects.length > 0;
+	const authReady = providerImages.some((image) =>
+		image.providers.some((provider) => provider.state === "connected"),
+	);
+	const imageReady =
+		accountImage?.state === "ready" &&
+		busy !== "image:rebuild" &&
+		imageError === null &&
+		buildError === null;
+	const onProgress = onboarding?.onProgress;
+	useEffect(() => {
+		onProgress?.(
+			{ github: githubReady, auth: authReady, image: imageReady },
+			providerImages.length > 0 && githubStatus !== null,
+		);
+	}, [
+		onProgress,
+		githubReady,
+		authReady,
+		imageReady,
+		providerImages.length > 0,
+		githubStatus !== null,
+	]);
+	useEffect(() => {
+		if (onboarding === undefined) return;
+		const refresh = () => {
+			void load(true);
+			void loadGithubRepos(true);
+		};
+		window.addEventListener("focus", refresh);
+		return () => window.removeEventListener("focus", refresh);
+	}, [onboarding !== undefined, load, loadGithubRepos]);
 
 	const run = async (
 		name: string,
@@ -242,6 +309,7 @@ export function CloudWorkspacePool() {
 		try {
 			await operation();
 			await load(true);
+			void refreshCloudImages().catch(() => undefined);
 		} catch (cause) {
 			const message =
 				cause instanceof CloudWorkspaceOpError &&
@@ -264,6 +332,7 @@ export function CloudWorkspacePool() {
 			const result = await runControlPlane((client) =>
 				client["machines.checkout"]({ offerId: CLOUD_WORKSPACE_OFFER_ID }),
 			);
+			window.dispatchEvent(new Event(CLOUD_CHECKOUT_STARTED));
 			await openExternal(result.checkoutUrl);
 		});
 
@@ -356,18 +425,48 @@ export function CloudWorkspacePool() {
 		);
 	};
 
-	const buildAccountImage = (mode: "update" | "rebuild") =>
-		run(`image:${mode}`, async () => {
-			setAccountImage(
-				await runControlPlane((client) =>
-					client["cloud.image.build"]({
-						mode,
-						providerId: imageProviderId,
-						idempotencyKey: `settings-image:${mode}:${crypto.randomUUID()}`,
-					}),
-				),
-			);
-		});
+	const buildAccountImage = () =>
+		run(
+			"image:rebuild",
+			async () => {
+				setBuildError(null);
+				const { providers: available } = await loadCloudProviders(true);
+				setProviders(available);
+				if (available.length === 0)
+					throw new Error("No cloud providers available");
+				const result = await rebuildCloudImages(
+					available.map((provider) => provider.providerId),
+					(providerId) =>
+						runControlPlane((client) =>
+							client["cloud.image.build"]({
+								mode: "rebuild",
+								providerId,
+								idempotencyKey: `settings-image:rebuild:${crypto.randomUUID()}`,
+							}),
+						),
+				);
+				setProviderImages((current) => [
+					...current.filter(
+						(image) =>
+							!result.images.some(
+								(next) => next.providerId === image.providerId,
+							),
+					),
+					...result.images,
+				]);
+				setBuildError(
+					result.failedProviderIds.length === 0
+						? null
+						: uiMessage("settings:cloud_images_start_failed", {
+								providers: result.failedProviderIds
+									.map(cloudProviderLabel)
+									.join(", "),
+							}),
+				);
+				void refreshCloudImages().catch(() => undefined);
+			},
+			setBuildError,
+		);
 
 	const removeProject = (project: CloudProject) =>
 		run(
@@ -441,6 +540,11 @@ export function CloudWorkspacePool() {
 
 	return (
 		<>
+			{onboarding !== undefined && setupLoading ? (
+				<p role="status" className="py-3 text-xs text-muted-foreground">
+					{uiMessage("common:loading")}
+				</p>
+			) : null}
 			{error === null ? null : (
 				<div
 					role="alert"
@@ -449,50 +553,52 @@ export function CloudWorkspacePool() {
 					{error}
 				</div>
 			)}
-			<CloudSettingsGroup
-				title={uiMessage("settings:cloud_workspace_pool_cloud_access")}
-				description={uiMessage(
-					"settings:cloud_workspace_pool_cloud_workspaces_keep_agents_running_when_this_app_or_your_laptop_is_o",
-				)}
-				action={
-					subscribed ? (
-						<Badge variant={serviceAvailable ? "success" : "warning"}>
-							{serviceAvailable
-								? uiMessage("settings:cloud_workspace_pool_ready")
-								: uiMessage("settings:cloud_workspace_pool_update_required")}
-						</Badge>
-					) : (
-						<Button
-							size="xs"
-							className={COMPACT_CLOUD_ACTION}
-							loading={busy === "checkout"}
-							onClick={() => void checkout()}
-						>
-							{uiMessage("settings:cloud_workspace_pool_subscribe_40_month")}
-						</Button>
-					)
-				}
-			>
-				<CloudSettingsRow
-					title={
-						subscribed
-							? uiMessage(
-									"settings:cloud_workspace_pool_cloud_workspace_is_ready",
-								)
-							: uiMessage(
-									"settings:cloud_workspace_pool_enable_cloud_workspace",
-								)
-					}
+			{onboarding === undefined ? (
+				<CloudSettingsGroup
+					title={uiMessage("settings:cloud_workspace_pool_cloud_access")}
 					description={uiMessage(
-						"settings:cloud_workspace_pool_each_chat_gets_an_isolated_workspace_compute_pauses_when_it_is_not_nee",
+						"settings:cloud_workspace_pool_cloud_workspaces_keep_agents_running_when_this_app_or_your_laptop_is_o",
 					)}
 					action={
-						<Cloud className="size-4 text-muted-foreground" aria-hidden />
+						subscribed ? (
+							<Badge variant={serviceAvailable ? "success" : "warning"}>
+								{serviceAvailable
+									? uiMessage("settings:cloud_workspace_pool_active")
+									: uiMessage("settings:cloud_workspace_pool_update_required")}
+							</Badge>
+						) : (
+							<Button
+								size="xs"
+								className={COMPACT_CLOUD_ACTION}
+								loading={busy === "checkout"}
+								onClick={() => void checkout()}
+							>
+								{uiMessage("settings:cloud_workspace_pool_subscribe_40_month")}
+							</Button>
+						)
 					}
-				/>
-			</CloudSettingsGroup>
+				>
+					<CloudSettingsRow
+						title={
+							subscribed
+								? uiMessage(
+										"settings:cloud_workspace_pool_cloud_workspace_is_ready",
+									)
+								: uiMessage(
+										"settings:cloud_workspace_pool_enable_cloud_workspace",
+									)
+						}
+						description={uiMessage(
+							"settings:cloud_workspace_pool_each_chat_gets_an_isolated_workspace_compute_pauses_when_it_is_not_nee",
+						)}
+						action={
+							<Cloud className="size-4 text-muted-foreground" aria-hidden />
+						}
+					/>
+				</CloudSettingsGroup>
+			) : null}
 
-			{subscribed && serviceAvailable ? (
+			{onboarding === undefined && subscribed && serviceAvailable ? (
 				<SegmentedTabs
 					value={view}
 					onValueChange={setView}
@@ -508,93 +614,102 @@ export function CloudWorkspacePool() {
 
 			{subscribed && serviceAvailable && view === "setup" ? (
 				<>
-					<CloudWorkspaceGithub
-						status={githubStatus}
-						loading={reposLoading}
-						busy={busy}
-						onInstall={() => void installGithub()}
-						onManage={(installationId) => void manageGithub(installationId)}
-						onRefresh={() => void loadGithubRepos(true)}
-						onDisconnect={(installationId) =>
-							void disconnectGithub(installationId)
-						}
-					/>
-					<CloudWorkspaceRepositories
-						projects={projects}
-						repositories={githubRepos}
-						githubAuthenticated={githubAuthenticated}
-						loading={reposLoading}
-						busy={busy}
-						error={projectError}
-						onRefresh={() => void loadGithubRepos(true)}
-						onAdd={(names) => void connectProjects(names)}
-						onRemove={(project) => void removeProject(project)}
-					/>
-					<CloudWorkspaceAuth />
-					<CloudApiKeys />
-					<CloudSettingsGroup
-						title={uiMessage("settings:cloud_workspace_pool_cloud_image")}
-						description={uiMessage(
-							"settings:cloud_workspace_pool_build_the_reusable_environment_that_starts_every_new_cloud_chat",
-						)}
-					>
-						<CloudSettingsRow
-							title={uiMessage("settings:cloud_machine_provider")}
-						>
-							<select
-								aria-label={uiMessage("settings:cloud_machine_provider")}
-								className="h-7 rounded-md bg-muted px-2 text-xs"
-								disabled={busy !== null}
-								value={
-									imageProviderId ??
-									accountImage?.providerId ??
-									providers[0]?.providerId ??
-									""
+					{onboarding === undefined || onboarding.step === "github" ? (
+						<>
+							<CloudWorkspaceGithub
+								status={githubStatus}
+								loading={reposLoading}
+								busy={busy}
+								onInstall={() => void installGithub()}
+								onManage={(installationId) => void manageGithub(installationId)}
+								onRefresh={() => void loadGithubRepos(true)}
+								onDisconnect={(installationId) =>
+									void disconnectGithub(installationId)
 								}
-								onChange={(event) => {
-									setAccountImage(null);
-									setImageProviderId(event.target.value);
-								}}
-							>
-								{providers.map((provider) => (
-									<option key={provider.providerId} value={provider.providerId}>
-										{cloudProviderLabel(provider.providerId)}
-									</option>
-								))}
-							</select>
-						</CloudSettingsRow>
-						<CloudImageReadiness
-							image={accountImage}
-							projects={projects}
-							busy={busy}
-							unavailable={imageError !== null || providers.length === 0}
-							onBuild={(mode) => void buildAccountImage(mode)}
-						/>
-						{imageError === null ? null : (
-							<div className="flex items-center justify-between gap-3 bg-destructive/10 px-3 py-2">
-								<p role="alert" className="text-xs text-destructive">
-									{imageError}
-								</p>
-								<Button
-									size="xs"
-									variant="ghost"
-									className={COMPACT_CLOUD_ACTION}
-									onClick={() => void load(true)}
+							/>
+							<CloudWorkspaceRepositories
+								projects={projects}
+								repositories={githubRepos}
+								githubAuthenticated={githubAuthenticated}
+								loading={reposLoading}
+								busy={busy}
+								error={projectError}
+								onRefresh={() => void loadGithubRepos(true)}
+								onAdd={(names) => void connectProjects(names)}
+								onRemove={(project) => void removeProject(project)}
+							/>
+						</>
+					) : null}
+					{onboarding === undefined || onboarding.step === "auth" ? (
+						<>
+							<CloudWorkspaceAuth />
+							<CloudApiKeys />
+						</>
+					) : null}
+					{onboarding === undefined || onboarding.step === "image" ? (
+						<CloudSettingsGroup
+							title={uiMessage("settings:cloud_workspace_pool_cloud_image")}
+							description={uiMessage("settings:cloud_images_all_description")}
+						>
+							{onboarding === undefined ? (
+								<CloudSettingsRow
+									title={uiMessage("settings:cloud_setup_title")}
+									description={uiMessage(
+										"settings:cloud_setup_guide_description",
+									)}
+									action={
+										<Button
+											className={COMPACT_CLOUD_ACTION}
+											variant="ghost"
+											onClick={requestCloudOnboarding}
+										>
+											{uiMessage("settings:cloud_setup_open_guide")}
+										</Button>
+									}
+								/>
+							) : null}
+							<CloudImageReadiness
+								image={accountImage}
+								allProviders
+								projects={projects}
+								busy={busy}
+								unavailable={imageError !== null || providers.length === 0}
+								onBuild={() => void buildAccountImage()}
+							/>
+							{imageError === null ? null : (
+								<div className="flex items-center justify-between gap-3 bg-destructive/10 px-3 py-2">
+									<p role="alert" className="text-xs text-destructive">
+										{imageError}
+									</p>
+									<Button
+										size="xs"
+										variant="ghost"
+										className={COMPACT_CLOUD_ACTION}
+										onClick={() => void load(true)}
+									>
+										{uiMessage("common:retry")}
+									</Button>
+								</div>
+							)}
+							{imageError === null && providers.length === 0 ? (
+								<p
+									role="status"
+									className="px-3 py-2 text-[11px] text-muted-foreground"
 								>
-									{uiMessage("common:retry")}
-								</Button>
-							</div>
-						)}
-						{imageError === null && providers.length === 0 ? (
-							<p
-								role="status"
-								className="px-3 py-2 text-[11px] text-muted-foreground"
-							>
-								{uiMessage("settings:cloud_workspace_pool_setup_unavailable")}
-							</p>
-						) : null}
-						<CloudImageBuildHistory builds={accountImage?.builds ?? []} />
-					</CloudSettingsGroup>
+									{uiMessage("settings:cloud_workspace_pool_setup_unavailable")}
+								</p>
+							) : null}
+							{buildError === null ? null : (
+								<p role="alert" className="px-3 py-2 text-xs text-destructive">
+									{buildError}
+								</p>
+							)}
+							<CloudImageProviders
+								providers={providers}
+								images={providerImages}
+							/>
+						</CloudSettingsGroup>
+					) : null}
 				</>
 			) : null}
 

@@ -89,5 +89,6 @@
 	"hosted_select_a_repository_before_starting_a_cloud_chat": "⟦Sëëlëëct àà rëëpôôsïïtôôry bëëfôôrëë stààrtïïng àà clôôüüd chààt.⟧",
 	"hosted_archive_chat": "⟦ÀÀrchïïvëë {{title}}⟧",
 	"hosted_restore_chat": "⟦Rëëstôôrëë {{title}}⟧",
-	"hosted_sign_in_failed": "⟦Côôüüld nôôt sïïgn ïïn. Chëëck yôôüür côônnëëctïïôôn àànd try ààgààïïn.⟧"
+	"hosted_sign_in_failed": "⟦Côôüüld nôôt sïïgn ïïn. Chëëck yôôüür côônnëëctïïôôn àànd try ààgààïïn.⟧",
+	"cloud_image_leave_warning": "⟦Yôôüür clôôüüd ïïmààgëë hààs üünbüüïïlt chààngëës. Lëëààvëë Sëëttïïngs? Yôôüü cààn rëëtüürn tôô Clôôüüd Wôôrkspààcëë sëëttïïngs tôô fïïnïïsh büüïïldïïng.⟧"
 }

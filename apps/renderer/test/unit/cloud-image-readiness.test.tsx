@@ -104,3 +104,43 @@ describe("CloudImageReadiness", () => {
 		expect(markup).toContain("Rebuild image");
 	});
 });
+
+it("does not describe broker credential rotation as an image change", () => {
+	const current = {
+		...image("outdated"),
+		providerAuthDeliveryVersion: 1 as const,
+		providers: [
+			{ providerId: "claude", state: "connected" as const, verifiedAt: 400 },
+		],
+	};
+	expect(cloudImageChangeSummary(current, [project])).toEqual(["repositories"]);
+});
+
+it("offers one rebuild action for all providers instead of an update action", () => {
+	const markup = renderToStaticMarkup(
+		<CloudImageReadiness
+			image={image("outdated")}
+			projects={[project]}
+			busy={null}
+			unavailable={false}
+			allProviders
+			onBuild={() => undefined}
+		/>,
+	);
+	expect(markup).toContain("Rebuild image");
+	expect(markup).not.toContain("Update image");
+	expect(markup.match(/<button/g)).toHaveLength(1);
+});
+it("prevents another rebuild while requests are being dispatched", () => {
+	const markup = renderToStaticMarkup(
+		<CloudImageReadiness
+			image={image("ready")}
+			projects={[project]}
+			busy="image:rebuild"
+			unavailable={false}
+			allProviders
+			onBuild={() => undefined}
+		/>,
+	);
+	expect(markup.match(/<button[^>]*>/)?.[0]).toContain("disabled");
+});

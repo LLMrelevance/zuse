@@ -89,5 +89,6 @@
 	"hosted_select_a_repository_before_starting_a_cloud_chat": "Wähle vor dem Start eines Cloud-Chats ein Repository aus.",
 	"hosted_archive_chat": "{{title}} archivieren",
 	"hosted_restore_chat": "{{title}} wiederherstellen",
-	"hosted_sign_in_failed": "Anmeldung fehlgeschlagen. Prüfe deine Verbindung und versuche es erneut."
+	"hosted_sign_in_failed": "Anmeldung fehlgeschlagen. Prüfe deine Verbindung und versuche es erneut.",
+	"cloud_image_leave_warning": "Your cloud image has unbuilt changes. Leave Settings? You can return to Cloud Workspace settings to finish building."
 }

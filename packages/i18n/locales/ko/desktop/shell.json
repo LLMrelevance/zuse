@@ -89,5 +89,6 @@
 	"hosted_select_a_repository_before_starting_a_cloud_chat": "클라우드 채팅을 시작하기 전에 저장소를 선택하세요.",
 	"hosted_archive_chat": "{{title}} 보관",
 	"hosted_restore_chat": "{{title}} 복원",
-	"hosted_sign_in_failed": "로그인할 수 없습니다. 연결을 확인하고 다시 시도하세요."
+	"hosted_sign_in_failed": "로그인할 수 없습니다. 연결을 확인하고 다시 시도하세요.",
+	"cloud_image_leave_warning": "Your cloud image has unbuilt changes. Leave Settings? You can return to Cloud Workspace settings to finish building."
 }
