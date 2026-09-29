@@ -22,9 +22,12 @@ import { useEnvironmentCatalogStore } from "./environment-catalog.ts";
  *   2. the last server answer persisted to localStorage (survives restarts),
  *   3. the server's `model.catalog` RPC, warmed once after app startup.
  *
- * The server is loaded once per renderer lifetime. The persisted snapshot
- * keeps first paint instant, while an explicit refresh remains available for
- * provider mutations. Replaces the per-provider inventory stores.
+ * The server is loaded once per environment, then kept current by
+ * `model.catalog.stream` (see `useModelCatalogStream`), so a catalog the
+ * server fetches after startup reaches the picker without a restart. The
+ * persisted snapshot keeps first paint instant, while an explicit refresh
+ * remains available for provider mutations. Replaces the per-provider
+ * inventory stores.
  */
 export type ModelCatalogSource = "bundled" | "storage" | "server";
 
@@ -39,6 +42,11 @@ type State = {
 	readonly ensureLoaded: () => Promise<void>;
 	/** Force the server to re-fetch the remote document and live listings. */
 	readonly refresh: () => Promise<void>;
+	/** Apply a catalog pushed by the server's `model.catalog.stream`. */
+	readonly receive: (
+		environmentId: EnvironmentId,
+		catalog: ResolvedModelCatalog,
+	) => void;
 };
 
 const STORAGE_KEY = "zuse.model-catalog.v1";
@@ -127,6 +135,11 @@ const sameCatalog = (
 ): boolean => JSON.stringify(a) === JSON.stringify(b);
 
 const pendingLoads = new Map<string, Promise<void>>();
+/**
+ * Bumped for every pushed catalog. A pulled answer that started before a push
+ * is older than what the stream already delivered, so it must not win.
+ */
+let pushSequence = 0;
 
 const initial = (() => {
 	dropLegacyInventoryCaches();
@@ -137,6 +150,28 @@ const initial = (() => {
 })();
 
 export const useModelCatalogStore = create<State>((set, get) => {
+	/**
+	 * Single entry point for a server answer, whether pulled by `load` or
+	 * pushed by the stream. Answers for an inactive environment are dropped.
+	 */
+	const applyServerCatalog = (
+		environmentId: EnvironmentId,
+		next: ResolvedModelCatalog,
+		patch: Partial<Pick<State, "loading">> = {},
+	): void => {
+		if (environmentId !== activeEnvironmentId()) return;
+		const changed = !sameCatalog(get().catalog, next);
+		set({
+			...patch,
+			...(changed ? { catalog: next } : {}),
+			source: "server",
+			loadedAt: Date.now(),
+			loadedEnvironmentId: environmentId,
+			error: null,
+		});
+		if (changed) writeStorage(next);
+	};
+
 	const load = async (refresh: boolean): Promise<void> => {
 		if (isHostedProduct() && activeEnvironmentId() === "local") {
 			set({
@@ -153,32 +188,17 @@ export const useModelCatalogStore = create<State>((set, get) => {
 			return;
 		}
 		set({ loading: true, error: null });
+		const startedAtPush = pushSequence;
 		const run = (async () => {
 			try {
 				const next = await fetchCatalog(environmentId, refresh);
-				if (environmentId !== activeEnvironmentId()) {
+				if (pushSequence !== startedAtPush) {
+					if (environmentId === activeEnvironmentId()) {
+						set({ loading: false });
+					}
 					return;
 				}
-				const current = get().catalog;
-				if (sameCatalog(current, next)) {
-					set({
-						loading: false,
-						loadedAt: Date.now(),
-						loadedEnvironmentId: environmentId,
-						source: "server",
-						error: null,
-					});
-				} else {
-					set({
-						catalog: next,
-						source: "server",
-						loadedAt: Date.now(),
-						loadedEnvironmentId: environmentId,
-						loading: false,
-						error: null,
-					});
-				}
-				writeStorage(next);
+				applyServerCatalog(environmentId, next, { loading: false });
 			} catch (err) {
 				// Old server without the RPC, or a transport blip: keep showing
 				// whatever we have (bundled or the last good answer).
@@ -212,6 +232,11 @@ export const useModelCatalogStore = create<State>((set, get) => {
 			await load(false);
 		},
 		refresh: () => load(true),
+		receive: (environmentId, catalog) => {
+			if (environmentId !== activeEnvironmentId()) return;
+			pushSequence += 1;
+			applyServerCatalog(environmentId, catalog);
+		},
 	};
 });
 
