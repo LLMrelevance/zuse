@@ -13,7 +13,11 @@ const state = vi.hoisted(() => ({
 	cancelDownload: vi.fn(),
 	hold: false,
 }));
-vi.mock("electron", () => ({
+vi.mock("electron", async () => ({
+	autoUpdater: Object.assign(new (await import("node:events")).EventEmitter(), {
+		checkForUpdates: vi.fn(),
+		quitAndInstall: vi.fn(),
+	}),
 	app: {
 		getPath: () => state.directory,
 		getVersion: () => state.version,
@@ -80,6 +84,11 @@ beforeEach(async () => {
 });
 afterEach(async () => {
 	vi.useRealTimers();
+	vi.restoreAllMocks();
+	const { autoUpdater } = await import("electron");
+	autoUpdater.removeAllListeners();
+	const updater = await import("electron-updater");
+	updater.autoUpdater.removeAllListeners();
 	await rm(state.directory, { recursive: true, force: true });
 });
 
@@ -96,6 +105,19 @@ async function start() {
 }
 
 describe("updater channel lifecycle", () => {
+	beforeEach(() => {
+		vi.spyOn(process, "platform", "get").mockReturnValue("linux");
+	});
+	it("still forces a stalled shutdown after a Linux install starts", async () => {
+		const updater = await start();
+		const { app } = await import("electron");
+		await vi.waitFor(() => expect(updater.getLastStatus().kind).toBe("ready"));
+		updater.installUpdate();
+		expect(updater.autoUpdater.quitAndInstall).toHaveBeenCalledOnce();
+		await vi.advanceTimersByTimeAsync(4_000);
+		expect(app.exit).toHaveBeenCalledExactlyOnceWith(0);
+	});
+
 	it("revokes a downloaded Preview before a switch and installs only the new Stable download", async () => {
 		const updater = await start();
 		await vi.waitFor(() => expect(updater.getLastStatus().kind).toBe("ready"));
@@ -142,5 +164,202 @@ describe("updater channel lifecycle", () => {
 		const updater = await start();
 		await vi.waitFor(() => expect(updater.getLastStatus().kind).toBe("ready"));
 		expect(updater.autoUpdater.allowDowngrade).toBe(false);
+	});
+});
+
+describe("macOS update installation handoff", () => {
+	beforeEach(() => {
+		vi.spyOn(process, "platform", "get").mockReturnValue("darwin");
+	});
+
+	it("waits for native staging before starting the shutdown watchdog", async () => {
+		const updater = await start();
+		const { app, autoUpdater: nativeUpdater } = await import("electron");
+		await vi.waitFor(() => expect(updater.getLastStatus().kind).toBe("ready"));
+		updater.installUpdate();
+		await vi.advanceTimersByTimeAsync(10_000);
+		expect(app.exit).not.toHaveBeenCalled();
+		nativeUpdater.emit("before-quit-for-update");
+		await vi.advanceTimersByTimeAsync(4_000);
+		expect(app.exit).toHaveBeenCalledExactlyOnceWith(0);
+	});
+
+	it("arms the watchdog even if the native quit starts synchronously", async () => {
+		const updater = await start();
+		const { app, autoUpdater: nativeUpdater } = await import("electron");
+		await vi.waitFor(() => expect(updater.getLastStatus().kind).toBe("ready"));
+		vi.mocked(nativeUpdater.quitAndInstall).mockImplementationOnce(() => {
+			nativeUpdater.emit("before-quit-for-update");
+		});
+		updater.installUpdate();
+		updater.installUpdate();
+		nativeUpdater.emit("update-downloaded");
+		await vi.advanceTimersByTimeAsync(4_000);
+		expect(app.exit).toHaveBeenCalledExactlyOnceWith(0);
+		expect(nativeUpdater.checkForUpdates).toHaveBeenCalledOnce();
+		expect(nativeUpdater.quitAndInstall).toHaveBeenCalledOnce();
+	});
+
+	it("keeps the app open and unlocks retry when staging fails", async () => {
+		const updater = await start();
+		const { app, autoUpdater: nativeUpdater } = await import("electron");
+		await vi.waitFor(() => expect(updater.getLastStatus().kind).toBe("ready"));
+		updater.installUpdate();
+		updater.autoUpdater.emit(
+			"error",
+			new Error("signature verification failed"),
+		);
+		expect(updater.getIsInstallingUpdate()).toBe(false);
+		expect(updater.getLastStatus()).toMatchObject({
+			kind: "error",
+			retryable: true,
+		});
+		await vi.advanceTimersByTimeAsync(10_000);
+		expect(app.exit).not.toHaveBeenCalled();
+		nativeUpdater.emit("update-downloaded");
+		expect(nativeUpdater.quitAndInstall).not.toHaveBeenCalled();
+		updater.triggerUpdateCheck();
+		await vi.waitFor(() => expect(updater.getLastStatus().kind).toBe("ready"));
+		updater.installUpdate();
+		nativeUpdater.emit("update-downloaded");
+		expect(nativeUpdater.quitAndInstall).toHaveBeenCalledOnce();
+	});
+
+	it("recovers from a synchronous staging failure", async () => {
+		const updater = await start();
+		const { app, autoUpdater: nativeUpdater } = await import("electron");
+		await vi.waitFor(() => expect(updater.getLastStatus().kind).toBe("ready"));
+		vi.mocked(nativeUpdater.checkForUpdates).mockImplementationOnce(() => {
+			throw new Error("native updater unavailable");
+		});
+		expect(() => updater.installUpdate()).not.toThrow();
+		expect(updater.getIsInstallingUpdate()).toBe(false);
+		nativeUpdater.emit("update-downloaded");
+		expect(nativeUpdater.quitAndInstall).not.toHaveBeenCalled();
+		await vi.advanceTimersByTimeAsync(10_000);
+		expect(app.exit).not.toHaveBeenCalled();
+	});
+
+	it("keeps timed-out native staging serialized and never quits on late completion", async () => {
+		const updater = await start();
+		const { app, autoUpdater: nativeUpdater } = await import("electron");
+		await vi.waitFor(() => expect(updater.getLastStatus().kind).toBe("ready"));
+		updater.installUpdate();
+		await vi.advanceTimersByTimeAsync(3 * 60_000);
+		expect(updater.getIsInstallingUpdate()).toBe(false);
+		expect(updater.getLastStatus()).toMatchObject({
+			kind: "error",
+			retryable: false,
+		});
+		updater.triggerUpdateCheck();
+		updater.installUpdate();
+		await vi.advanceTimersByTimeAsync(6 * 60 * 60_000);
+		expect(updater.autoUpdater.checkForUpdates).toHaveBeenCalledOnce();
+		expect(nativeUpdater.checkForUpdates).toHaveBeenCalledOnce();
+		await expect(
+			state.handlers.get(UPDATE_CHANNEL_SET)?.({}, "stable"),
+		).rejects.toThrow();
+		nativeUpdater.emit("update-downloaded");
+		await vi.advanceTimersByTimeAsync(4_000);
+		expect(app.exit).not.toHaveBeenCalled();
+		expect(nativeUpdater.quitAndInstall).not.toHaveBeenCalled();
+		expect(updater.getLastStatus()).toEqual({
+			kind: "ready",
+			version: state.target,
+		});
+		// Squirrel owns the staged version until restart; a feed switch must not
+		// relabel it or schedule a second native download.
+		await expect(
+			state.handlers.get(UPDATE_CHANNEL_SET)?.({}, "stable"),
+		).rejects.toThrow();
+		updater.triggerUpdateCheck();
+		updater.installUpdate();
+		expect(nativeUpdater.checkForUpdates).toHaveBeenCalledOnce();
+		expect(nativeUpdater.quitAndInstall).toHaveBeenCalledOnce();
+	});
+
+	it.each([
+		"error",
+		"update-not-available",
+	])("releases timed-out staging only after native %s", async (event) => {
+		const updater = await start();
+		const { autoUpdater: nativeUpdater } = await import("electron");
+		await vi.waitFor(() => expect(updater.getLastStatus().kind).toBe("ready"));
+		updater.installUpdate();
+		await vi.advanceTimersByTimeAsync(3 * 60_000);
+		if (event === "error")
+			updater.autoUpdater.emit("error", new Error("native staging failed"));
+		else nativeUpdater.emit(event);
+		expect(updater.getLastStatus()).toMatchObject({
+			kind: "error",
+			retryable: true,
+		});
+		await state.handlers.get(UPDATE_CHANNEL_SET)?.({}, "stable");
+		await vi.waitFor(() => expect(updater.getLastStatus().kind).toBe("ready"));
+		updater.installUpdate();
+		expect(nativeUpdater.checkForUpdates).toHaveBeenCalledTimes(2);
+		nativeUpdater.emit("update-downloaded");
+		expect(nativeUpdater.quitAndInstall).toHaveBeenCalledOnce();
+	});
+
+	it("retries a failed native quit without replacing the staged update", async () => {
+		const updater = await start();
+		const { autoUpdater: nativeUpdater } = await import("electron");
+		await vi.waitFor(() => expect(updater.getLastStatus().kind).toBe("ready"));
+		vi.mocked(nativeUpdater.quitAndInstall).mockImplementationOnce(() => {
+			throw new Error("quit failed");
+		});
+		updater.installUpdate();
+		nativeUpdater.emit("update-downloaded");
+		expect(updater.getIsInstallingUpdate()).toBe(false);
+		await expect(
+			state.handlers.get(UPDATE_CHANNEL_SET)?.({}, "stable"),
+		).rejects.toThrow();
+		updater.triggerUpdateCheck();
+		expect(updater.getLastStatus()).toEqual({
+			kind: "ready",
+			version: state.target,
+		});
+		updater.installUpdate();
+		expect(nativeUpdater.quitAndInstall).toHaveBeenCalledTimes(2);
+		expect(nativeUpdater.checkForUpdates).toHaveBeenCalledOnce();
+		expect(updater.autoUpdater.checkForUpdates).toHaveBeenCalledOnce();
+	});
+
+	it("clears the staging deadline after successful staging", async () => {
+		const updater = await start();
+		const { autoUpdater: nativeUpdater } = await import("electron");
+		await vi.waitFor(() => expect(updater.getLastStatus().kind).toBe("ready"));
+		updater.installUpdate();
+		nativeUpdater.emit("update-downloaded");
+		await vi.advanceTimersByTimeAsync(3 * 60_000);
+		expect(updater.getIsInstallingUpdate()).toBe(true);
+		expect(updater.getLastStatus().kind).toBe("ready");
+	});
+
+	it("clears a failed attempt's deadline before a retry", async () => {
+		const updater = await start();
+		await vi.waitFor(() => expect(updater.getLastStatus().kind).toBe("ready"));
+		updater.installUpdate();
+		await vi.advanceTimersByTimeAsync(60_000);
+		updater.autoUpdater.emit("error", new Error("staging failed"));
+		updater.triggerUpdateCheck();
+		await vi.waitFor(() => expect(updater.getLastStatus().kind).toBe("ready"));
+		updater.installUpdate();
+		await vi.advanceTimersByTimeAsync(2 * 60_000);
+		expect(updater.getIsInstallingUpdate()).toBe(true);
+		expect(updater.getLastStatus().kind).toBe("ready");
+	});
+
+	it("does not replace the feed or channel during native staging", async () => {
+		const updater = await start();
+		await vi.waitFor(() => expect(updater.getLastStatus().kind).toBe("ready"));
+		updater.installUpdate();
+		updater.triggerUpdateCheck();
+		await vi.advanceTimersByTimeAsync(60_000);
+		expect(updater.autoUpdater.checkForUpdates).toHaveBeenCalledOnce();
+		await expect(
+			state.handlers.get(UPDATE_CHANNEL_SET)?.({}, "preview"),
+		).rejects.toThrow("An update is already installing");
 	});
 });
